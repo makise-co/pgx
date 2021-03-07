@@ -1,0 +1,43 @@
+{
+    "name": "makise-co/postgres",
+    "description": "A Pure coroutine PHP client for PostgreSQL based on libpq",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "swoole",
+        "pgsql",
+        "postgres",
+        "client",
+        "coro",
+        "coroutine"
+    ],
+    "authors": [
+        {
+            "name": "Dmitry K.",
+            "email": "coder1994@gmail.com"
+        }
+    ],
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "suggest": {
+    },
+    "require": {
+        "php": ">=8.0",
+        "phpinnacle/buffer": "^1.2"
+    },
+    "require-dev": {
+        "swow/swow": "dev-develop"
+    },
+    "autoload": {
+        "psr-4": {
+            "MakiseCo\\Postgres\\": "src/"
+        },
+        "files": [
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "MakiseCo\\Postgres\\Tests\\": "tests/"
+        }
+    }
+}
