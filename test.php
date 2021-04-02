@@ -3,7 +3,6 @@
 declare(strict_types=1);
 
 use MakiseCo\Postgres\Config;
-use MakiseCo\Postgres\Driver\Pq\Connector;
 use Swow\Channel;
 use Swow\Channel\Selector;
 use Swow\Coroutine;
@@ -24,7 +23,31 @@ $config = new Config(
 );
 
 $pgConn = \MakiseCo\Postgres\Driver\Pgx\PgConn::connect(null, $config);
-var_dump($pgConn);
+//var_dump($pgConn);
+
+//$result = $pgConn->exec(null, "SELECT 1, 2;");
+//var_dump($result->readAll());
+//
+//try {
+//    $result = $pgConn->execParams(null, "SELECT $1::int + $2::int;", ['1', '2']);
+//} catch (Throwable $e) {
+//    var_dump($e);
+//    exit;
+//}
+//var_dump('hello');
+//var_dump($result->read());
+//var_dump($pgConn);
+
+$stmtDesc = $pgConn->prepare(null, 'tmp_stmt', 'SELECT $1::int', []);
+var_dump($stmtDesc);
+
+$rr = $pgConn->execPrepared(null, $stmtDesc->name, ['228'], [], []);
+$res = $rr->read();
+var_dump($res);
+
+$rr = $pgConn->execPrepared(null, $stmtDesc->name, ['322'], [], []);
+$res = $rr->read();
+var_dump($res);
 
 //$connector = new Connector();
 //$conn = $connector->connect($config);

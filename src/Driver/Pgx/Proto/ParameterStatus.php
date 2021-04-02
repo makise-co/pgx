@@ -14,7 +14,7 @@ class ParameterStatus implements BackendMessage
         $offset = 0;
         $name = BufferHelper::readCString($data, $offset);
 
-        $offset += strlen($name);
+        $offset += strlen($name) + 1; // +1 is null-terminator
         $value = BufferHelper::readCString($data, $offset);
 
         $this->name = $name;

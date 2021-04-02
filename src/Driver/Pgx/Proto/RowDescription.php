@@ -28,8 +28,8 @@ class RowDescription implements BackendMessage
         for ($i = 0; $i < $fieldCount; $i++) {
             // TODO: Not performant way
             $name = BufferHelper::readCString($buffer->bytes(), 0);
-            // remove bytes from buffer
-            $buffer->consume(strlen($name));
+            // remove bytes from buffer, +1 is null-terminator
+            $buffer->consume(strlen($name) + 1);
 
             $tableOID = $buffer->consumeInt32();
             $tableAttributeNumber = $buffer->consumeInt16();

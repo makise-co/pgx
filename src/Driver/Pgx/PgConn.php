@@ -13,13 +13,19 @@ use MakiseCo\Postgres\Driver\Pgx\Proto\AuthenticationMD5Password;
 use MakiseCo\Postgres\Driver\Pgx\Proto\AuthenticationOk;
 use MakiseCo\Postgres\Driver\Pgx\Proto\BackendKeyData;
 use MakiseCo\Postgres\Driver\Pgx\Proto\BackendMessage;
+use MakiseCo\Postgres\Driver\Pgx\Proto\Bind;
+use MakiseCo\Postgres\Driver\Pgx\Proto\CancelRequest;
+use MakiseCo\Postgres\Driver\Pgx\Proto\Describe;
 use MakiseCo\Postgres\Driver\Pgx\Proto\ErrorResponse;
+use MakiseCo\Postgres\Driver\Pgx\Proto\Execute;
 use MakiseCo\Postgres\Driver\Pgx\Proto\FrontendMessage;
 use MakiseCo\Postgres\Driver\Pgx\Proto\ParameterStatus;
+use MakiseCo\Postgres\Driver\Pgx\Proto\Parse;
 use MakiseCo\Postgres\Driver\Pgx\Proto\PasswordMessage;
 use MakiseCo\Postgres\Driver\Pgx\Proto\Query;
 use MakiseCo\Postgres\Driver\Pgx\Proto\ReadyForQuery;
 use MakiseCo\Postgres\Driver\Pgx\Proto\StartupMessage;
+use MakiseCo\Postgres\Driver\Pgx\Proto\Sync;
 use Swow;
 use Swow\Socket\Exception as SocketException;
 
@@ -51,7 +57,6 @@ class PgConn
 
     private ?BackendMessage $peekedMessage = null;
 
-    private string $wbuff;
     // TODO: Result reader
     // TODO: Multi result reader
     //
@@ -60,7 +65,6 @@ class PgConn
     {
         $pgConn = new PgConn();
         $pgConn->config = $config;
-        $pgConn->wbuff = '';
 
         // TODO: Support fallback configs
 
@@ -90,9 +94,8 @@ class PgConn
 
         $pgConn->sendMessage($startupMsg);
 
-        for (; ;) {
+        while (true) {
             $message = $pgConn->receiveMessage();
-            var_dump("Received message: " . $message::class);
 
             switch ($message::class) {
                 case BackendKeyData::class:
@@ -163,6 +166,14 @@ class PgConn
         );
     }
 
+    /**
+     * @param $ctx
+     * @param string $sql
+     *
+     * @return MultiResultReader must be closed before PgConn can be used again.
+     *
+     * @throws \Throwable
+     */
     public function exec($ctx, string $sql): MultiResultReader
     {
         $this->lock();
@@ -185,9 +196,310 @@ class PgConn
         );
     }
 
+    /**
+     * ExecParams executes a command via the PostgreSQL extended query protocol.
+     * ResultReader must be closed before PgConn can be used again.
+     *
+     * @param $ctx
+     * @param string $sql is a SQL command string. It may only contain one query.
+     * Parameter substitution is positional using $1, $2, $3, etc.
+     *
+     * @param array<string> $paramValues are the parameter values.
+     * It must be encoded in the format given by paramFormats.
+     *
+     * @param array<int> $paramOIDs is an array of data type OIDs for paramValues.
+     * If paramOIDs is empty, the server will infer the data type for all parameters.
+     * Any paramOID element that is 0 that will cause the server to infer the data type for that parameter.
+     *
+     * @param array<int> $paramFormats is an array of format codes determining for each paramValue column
+     * whether it is encoded in text or binary format.
+     * If paramFormats is empty all params are text format.
+     *
+     * @param array<int> $resultFormats is an array of format codes determining for each result column
+     * whether it is encoded in text or binary format.
+     * If resultFormats is empty all results will be in text format.
+     *
+     * @return ResultReader must be closed before PgConn can be used again.
+     */
+    public function execParams(
+        $ctx,
+        string $sql,
+        array $paramValues = [],
+        array $paramOIDs = [],
+        array $paramFormats = [],
+        array $resultFormats = [],
+    ): ResultReader {
+        $this->lock();
+
+        $parseMessage = new Parse(
+            name: '',
+            query: $sql,
+            parameterOIDs: $paramOIDs,
+        );
+        $bindMessage = new Bind(
+            destinationPortal: '',
+            preparedStatement: '',
+            parameterFormatCodes: $paramFormats,
+            parameters: $paramValues,
+            resultFormatCodes: $resultFormats,
+        );
+        $describeMessage = new Describe(
+            objectType: 'P',
+            name: '',
+        );
+        $executeMessage = new Execute(
+            portal: '',
+            maxRows: 0,
+        );
+        $syncMessage = new Sync();
+
+        try {
+            $this->sendMessagesInBatch(
+                $parseMessage,
+                $bindMessage,
+                $describeMessage,
+                $executeMessage,
+                $syncMessage,
+            );
+        } catch (\Throwable $e) {
+            $this->unlock();
+
+            throw $e;
+        }
+
+        $rr = new ResultReader(
+            ctx: $ctx,
+            pgConn: $this,
+        );
+
+        try {
+            $rr->readUntilRowDescription();
+        } catch (\Throwable $e) {
+            $this->unlock();
+
+            throw  $e;
+        }
+
+        return $rr;
+    }
+
+    /**
+     * ExecPrepared enqueues the execution of a prepared statement via the PostgreSQL extended query protocol.
+     *
+     * @param $ctx
+     * @param string $stmtName is a prepared statement name
+     *
+     * @param array<string> $paramValues are the parameter values.
+     * It must be encoded in the format given by paramFormats.
+     *
+     * @param array<int> $paramFormats is an array of format codes determining for each paramValue column
+     * whether it is encoded in text or binary format.
+     * If paramFormats is empty all params are text format.
+     *
+     * @param array<int> $resultFormats is an array of format codes determining for each result column
+     * whether it is encoded in text or binary format.
+     * If resultFormats is empty all results will be in text format.
+     *
+     * @return ResultReader must be closed before PgConn can be used again.
+     */
+    public function execPrepared(
+        $ctx,
+        string $stmtName,
+        array $paramValues,
+        array $paramFormats,
+        array $resultFormats
+    ): ResultReader {
+        $this->lock();
+
+        $bindMessage = new Bind(
+            destinationPortal: '',
+            preparedStatement: $stmtName,
+            parameterFormatCodes: $paramFormats,
+            parameters: $paramValues,
+            resultFormatCodes: $resultFormats,
+        );
+        $describeMessage = new Describe(
+            objectType: 'P',
+            name: '',
+        );
+        $executeMessage = new Execute(
+            portal: '',
+            maxRows: 0,
+        );
+        $syncMessage = new Sync();
+
+        try {
+            $this->sendMessagesInBatch(
+                $bindMessage,
+                $describeMessage,
+                $executeMessage,
+                $syncMessage,
+            );
+        } catch (\Throwable $e) {
+            $this->unlock();
+
+            throw $e;
+        }
+
+        $rr = new ResultReader(
+            ctx: $ctx,
+            pgConn: $this,
+        );
+
+        try {
+            $rr->readUntilRowDescription();
+        } catch (\Throwable $e) {
+            $this->unlock();
+
+            throw  $e;
+        }
+
+        return $rr;
+    }
+
+    /**
+     * Prepare creates a prepared statement. If the name is empty, the anonymous prepared statement will be used. This
+     * allows Prepare to also to describe statements without creating a server-side prepared statement.
+     *
+     * @param $ctx
+     * @param string $name statement name
+     * @param string $sql statement query
+     * @param array<int> $paramOIDs
+     *
+     * @return StatementDescription
+     *
+     * @throws PgError
+     * @throws \Throwable
+     */
+    public function prepare($ctx, string $name, string $sql, array $paramOIDs): StatementDescription
+    {
+        $this->lock();
+        // TODO: Use coroutine defer Unlock
+
+        $parseMessage = new Parse(
+            name: $name,
+            query: $sql,
+            parameterOIDs: $paramOIDs,
+        );
+        $describeMessage = new Describe(
+            objectType: 'S',
+            name: $name,
+        );
+        $syncMessage = new Sync();
+
+        try {
+            $this->sendMessagesInBatch(
+                $parseMessage,
+                $describeMessage,
+                $syncMessage,
+            );
+        } catch (\Throwable $e) {
+            $this->unlock();
+
+            throw $e;
+        }
+
+        /** @var array<int> $receivedParamOIDs */
+        $receivedParamOIDs = [];
+        /** @var array<Proto\FieldDescription> $receivedFields */
+        $receivedFields = [];
+
+        while (true) {
+            try {
+                $message = $this->receiveMessage();
+            } catch (\Throwable $e) {
+                $this->unlock();
+
+                throw $e;
+            }
+
+            switch ($message::class) {
+                case Proto\ParameterDescription::class:
+                    /** @var Proto\ParameterDescription $message */
+                    $receivedParamOIDs = $message->parameterOIDs;
+                    break;
+                case Proto\RowDescription::class:
+                    /** @var Proto\RowDescription $message */
+                    $receivedFields = $message->fields;
+                    break;
+                case Proto\ErrorResponse::class:
+                    $this->unlock();
+
+                    /** @var Proto\ErrorResponse $message */
+                    throw PgConn::errorResponseToPgError($message);
+                case Proto\ReadyForQuery::class:
+                    // break from loop where postgres is ready for query
+                    break 2;
+            }
+        }
+
+        $this->unlock();
+
+        return new StatementDescription(
+            name: $name,
+            sql: $sql,
+            paramOIDs: $receivedParamOIDs,
+            fields: $receivedFields,
+        );
+    }
+
+    /**
+     * CancelRequest sends a cancel request to the PostgreSQL server.
+     * It throws an error if unable to deliver the cancel request,
+     * but lack of an error does not ensure that the query was canceled.
+     *
+     * As specified in the documentation, there is no way to be sure a query was canceled.
+     *
+     * @see https://www.postgresql.org/docs/11/protocol-flow.html#id-1.10.5.7.9
+     *
+     * @param $ctx
+     *
+     * @throws \Throwable
+     */
+    public function cancelRequest($ctx): void
+    {
+        $serverAddr = $this->conn->getPeerAddress();
+        $serverPort = $this->conn->getPeerPort();
+
+        $cancelConn = new Swow\Socket($this->conn->getType());
+        $cancelConn->connect($serverAddr, $serverPort);
+
+        $message = new CancelRequest(pid: $this->pid, secretKey: $this->secretKey);
+
+        try {
+            $cancelConn->sendString($message->encode(''));
+            $cancelConn->recvString(1);
+        } catch (SocketException $e) {
+            // server should close connection
+            if ($e->getCode() !== Swow\Errno\ECONNRESET) {
+                throw $e;
+            }
+        } finally {
+            $cancelConn->close();
+        }
+    }
+
+    private function sendMessagesInBatch(FrontendMessage ...$messages): void
+    {
+        $encoded = '';
+
+        foreach ($messages as $message) {
+            $msgName = $message::class;
+
+            $encodedMsg = $message->encode('');
+
+            var_dump("[Batch] Sending message {$msgName}");
+            var_dump("[Batch] Sending message body: " . bin2hex($encodedMsg));
+
+            $encoded .= $encodedMsg;
+        }
+
+        $this->conn->sendString($encoded);
+    }
+
     private function sendMessage(FrontendMessage $message): void
     {
-        $encoded = $message->encode($this->wbuff);
+        $encoded = $message->encode('');
 
         $msgName = $message::class;
         var_dump("Sending message {$msgName}");
@@ -231,6 +543,9 @@ class PgConn
      */
     public function receiveMessage(): BackendMessage
     {
+//        var_dump('Receive message called');
+//        var_dump(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 5));
+
         $msg = $this->peekMessage();
         $this->peekedMessage = null;
 
@@ -250,7 +565,8 @@ class PgConn
         return $msg;
     }
 
-    private function peekMessage(): BackendMessage
+    // TODO: Should be private
+    public function peekMessage(): BackendMessage
     {
         if ($this->peekedMessage !== null) {
             return $this->peekedMessage;

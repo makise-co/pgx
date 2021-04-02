@@ -6,12 +6,14 @@ namespace MakiseCo\Postgres\Driver\Pgx\Proto;
 
 class CommandComplete implements BackendMessage
 {
-    public string $commandTag = '';
+    public CommandTag $commandTag;
 
     public function decode(string $data): void
     {
         try {
-            $this->commandTag = BufferHelper::readCString($data, 0);
+            $this->commandTag = new CommandTag(
+                tag: BufferHelper::readCString($data, 0),
+            );
         } catch (\InvalidArgumentException) {
             throw new Exception\InvalidMessageFormat('CommandComplete');
         }
